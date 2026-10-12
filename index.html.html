@@ -1,0 +1,661 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Theory 3</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout concept: a full-bleed 3D stage with a thin HUD on top (title, stage row, status)
+   and a single decision panel at the bottom that only appears when the simulation pauses.
+   Single dark look by design: glowing points need a dark ground. */
+:root {
+  --bg: #04060d;
+  --ink: #e9eefb;
+  --mute: #8d98b5;
+  --cloud: #5aa7ff;
+  --photon: #ffc857;
+  --nucleus: #ff5d7a;
+  --panel: rgba(9, 13, 26, 0.82);
+  --line: rgba(160, 185, 255, 0.24);
+  --display: 'Instrument Serif', Georgia, 'Times New Roman', serif;
+  --body: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--body);
+  overflow: hidden;
+  -webkit-user-select: none;
+  user-select: none;
+}
+#gl { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+#gl.dragging { cursor: grabbing; }
+#labels { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+.tag {
+  position: absolute; left: 0; top: 0;
+  font: 500 12px/1 var(--mono);
+  color: var(--ink);
+  padding: 4px 7px;
+  background: rgba(6, 10, 22, 0.6);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.25s;
+  will-change: transform;
+}
+.hud {
+  position: fixed; top: 0; left: 0; right: 0;
+  padding: 14px 16px 0;
+  padding-top: calc(14px + env(safe-area-inset-top, 0px));
+  pointer-events: none;
+  display: flex; flex-direction: column; gap: 10px;
+}
+h1 { margin: 0; font: 400 clamp(30px, 6vw, 42px)/1 var(--display); letter-spacing: 0.01em; }
+#stages { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+#stages li {
+  font: 400 12px/1 var(--mono);
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--mute);
+  transition: color 0.3s, border-color 0.3s, background 0.3s;
+}
+#stages li.on { color: var(--bg); background: var(--photon); border-color: var(--photon); font-weight: 500; }
+#status { margin: 0; font: 400 14px/1.4 var(--body); color: var(--ink); max-width: 56ch; min-height: 1.4em; }
+.bottom {
+  position: fixed; left: 0; right: 0; bottom: 0;
+  padding: 0 16px calc(14px + env(safe-area-inset-bottom, 0px));
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  pointer-events: none;
+}
+#panel {
+  pointer-events: auto;
+  width: 100%; max-width: 460px; box-sizing: border-box;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 16px;
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  display: flex; flex-direction: column; gap: 12px; align-items: flex-start;
+}
+#panel[hidden] { display: none !important; }
+#panelText { margin: 0; font: 400 15px/1.5 var(--body); }
+#panelText[hidden] { display: none !important; }
+#panelBtn {
+  font: 500 14px/1 var(--body);
+  background: var(--photon); color: #1a1405;
+  border: 0; border-radius: 999px; padding: 11px 22px; cursor: pointer;
+}
+#panelBtn:hover { filter: brightness(1.08); }
+#panelBtn:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+.hint { margin: 0; font: 400 12px/1 var(--mono); color: var(--mute); }
+</style>
+
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="labels"></div>
+<header class="hud">
+  <h1>Theory 3</h1>
+  <ol id="stages">
+    <li>Approach</li><li>Concentrating</li><li>Absorbed</li><li>Rippling</li><li>Re-emitted</li>
+  </ol>
+  <p id="status" aria-live="polite"></p>
+</header>
+<div class="bottom">
+  <div id="panel" role="status" hidden>
+    <p id="panelText"></p>
+    <button id="panelBtn" type="button">Continue</button>
+  </div>
+  <p class="hint">Drag To Turn The Atom.</p>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+/* ==========================================================================
+   Theory 3
+   A dual-natured photon is absorbed by a dual-natured electron. The energy
+   crosses the atom as ripples and a new photon is re-emitted.
+
+   Everything that belongs to the atom lives in one THREE.Group ("model"), so
+   dragging rotates cloud, nucleus, photons, ripples and dotted path together.
+   The camera never moves and never zooms.
+   ========================================================================== */
+(function () {
+  'use strict';
+
+  var statusEl = document.getElementById('status');
+  if (!window.THREE) { statusEl.textContent = 'Three.js could not be loaded. Check your connection and reload.'; return; }
+
+  /* ------------------------------ constants ------------------------------ */
+  var CAM_DIST = 7.5;                 // fixed observer distance
+  var R = 1.8;                        // electron cloud radius (covers the whole nucleus)
+  var B = 0.6;                        // photon path passes this far beside the nucleus
+  var HX = Math.sqrt(R * R - B * B);  // half-chord of the path through the cloud
+  var CONTACT = new THREE.Vector3(-HX, B, 0);  // where the path enters the cloud
+  var EXIT    = new THREE.Vector3( HX, B, 0);  // where the path leaves the cloud
+  var PATH_X0 = -4.2, PATH_X1 = 4.2;           // visible ends of the dotted path
+  var LIGHT_SPEED  = 1.8;             // photon speed (units per second)
+  var RIPPLE_SPEED = 0.8;             // ripples are slower than light
+
+  // Timeline numbers (seconds)
+  var HOLD = 0.6;                     // photon rests briefly so it can be seen
+  var SHRINK_DUR = 0.8;               // cloud collapse duration
+  var SHRINK_START = HOLD + ((CONTACT.x - 1.8) - PATH_X0) / LIGHT_SPEED; // when photon is 1.8 from contact
+  var ABSORB_FADE = 0.3;              // photon dissolves into the electron
+  var EXPAND_DUR = 0.9;               // electron expands back into a cloud
+
+  var PAUSE_TEXT = {
+    concentrate: 'The electron cloud is concentrating. The probability of finding the electron is shifting toward the point of contact.',
+    absorb: 'The electron is absorbing the photon. At this instant, the photon\'s energy is absorbed by the electron as a particle.',
+    ripples: 'The energy transfer takes time. The result is seen as an overall decrease in the speed of light.',
+    emit: 'A new photon is being created from the energy of the previous photon.'
+  };
+
+  /* ------------------------------ helpers -------------------------------- */
+  function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
+  function easeSine(u) { return -(Math.cos(Math.PI * u) - 1) / 2; }
+  function smooth(a, b, x) { var t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); }
+
+  /* ------------------------------ renderer ------------------------------- */
+  var canvas = document.getElementById('gl');
+  var renderer;
+  try { renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true }); }
+  catch (e) { statusEl.textContent = 'This browser could not start WebGL.'; return; }
+  renderer.setClearColor(0x04060d, 1);
+
+  var scene = new THREE.Scene();
+  var camera = new THREE.PerspectiveCamera(44, 1, 0.1, 200);
+  camera.position.set(0, 0, CAM_DIST);
+
+  // Soft lighting so the solid particles (nucleus, electron) read as 3D spheres
+  scene.add(new THREE.AmbientLight(0x8fa2d8, 0.7));
+  var key = new THREE.DirectionalLight(0xffffff, 0.95);
+  key.position.set(3, 4, 5);
+  scene.add(key);
+
+  // Everything of the atom lives here and rotates as one object
+  var model = new THREE.Group();
+  model.rotation.set(0.3, 0.45, 0);
+  scene.add(model);
+
+  /* A dim, fixed starfield gives depth. It is outside the model, so it stays still while the atom turns. */
+  (function () {
+    var n = 600, p = new Float32Array(n * 3);
+    for (var i = 0; i < n; i++) {
+      var v = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize().multiplyScalar(40);
+      p[i * 3] = v.x; p[i * 3 + 1] = v.y; p[i * 3 + 2] = v.z;
+    }
+    var g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(p, 3));
+    scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0x8fa4d8, size: 1.3, sizeAttenuation: false, transparent: true, opacity: 0.45, depthWrite: false })));
+  })();
+
+  /* Round soft glow texture, drawn once on a canvas and reused by every sprite */
+  var glowTex = (function () {
+    var c = document.createElement('canvas'); c.width = c.height = 128;
+    var g = c.getContext('2d');
+    var gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+    gr.addColorStop(0, 'rgba(255,255,255,1)');
+    gr.addColorStop(0.25, 'rgba(255,255,255,0.55)');
+    gr.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+    return new THREE.CanvasTexture(c);
+  })();
+
+  function glowSprite(color, size, opacity) {
+    var s = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: glowTex, color: color, transparent: true, opacity: opacity,
+      blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false
+    }));
+    s.scale.set(size, size, 1);
+    return s;
+  }
+
+  /* ---------------------------- electron cloud --------------------------- */
+  /* ~9000 fine points, denser toward the centre. All motion (ripples, collapse
+     toward a target point, vibration) is done in the vertex shader, so the
+     cloud is always drawn and can never become invisible. */
+  var CLOUD_N = 9000;
+  var cloudUniforms = {
+    uTime: { value: 0 },
+    uShrink: { value: 0 },                          // 0 = full cloud, 1 = collapsed to a point
+    uTarget: { value: CONTACT.clone() },            // the point the cloud gathers into
+    uOrigin: { value: CONTACT.clone() },            // ripple source (the contact point)
+    uRippleFront: { value: 0 },                     // distance the ripple front has travelled
+    uRippleAmp: { value: 0 },                       // ripple strength
+    uVibe: { value: 0 },                            // vibration strength
+    uTint: { value: 0 },                            // warm tint while the cloud holds the energy
+    uPx: { value: 600 },                            // pixels per world unit at distance 1
+    uCamDist: { value: CAM_DIST }
+  };
+
+  var cloudMaterial = new THREE.ShaderMaterial({
+    uniforms: cloudUniforms,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    vertexShader: [
+      'attribute float aSeed; attribute float aSize;',
+      'uniform float uTime, uShrink, uRippleFront, uRippleAmp, uVibe, uTint, uPx, uCamDist;',
+      'uniform vec3 uTarget, uOrigin;',
+      'varying float vAlpha; varying vec3 vColor;',
+      'void main() {',
+      '  vec3 p = position;',
+      '  float rad = length(p);',
+      '  vec3 dir = p / max(rad, 1e-4);',
+      '  // probabilistic shimmer: every point jitters a little',
+      '  p += dir * sin(uTime * (1.5 + aSeed * 2.5) + aSeed * 40.0) * 0.012;',
+      '  // ripples: a wave packet spreading from the contact point, slowly decaying behind its front',
+      '  float d = distance(position, uOrigin);',
+      '  float lag = uRippleFront - d;',
+      '  float env = smoothstep(0.0, 0.2, lag) * exp(-max(lag, 0.0) * 0.6);',
+      '  float wave = sin(lag * 8.5) * env * uRippleAmp;',
+      '  p += dir * wave * 0.11;',
+      '  // collapse: every point is pulled toward the target (a balloon cover drawn to one point)',
+      '  p = uTarget + (p - uTarget) * (1.0 - uShrink * 0.97);',
+      '  // vibration of the collapsed electron',
+      '  p += vec3(sin(uTime * 57.0 + aSeed * 31.0), sin(uTime * 63.0 + aSeed * 53.0), sin(uTime * 49.0 + aSeed * 71.0)) * 0.04 * uVibe;',
+      '  vec4 mv = modelViewMatrix * vec4(p, 1.0);',
+      '  gl_Position = projectionMatrix * mv;',
+      '  // depth cue: far side of the cloud is dimmer than the near side',
+      '  float zn = clamp((-mv.z - (uCamDist - 1.8)) / 3.6, 0.0, 1.0);',
+      '  float depthFade = mix(1.0, 0.4, zn);',
+      '  float edge = 1.0 - smoothstep(0.35, 1.0, rad / 1.8);',
+      '  vAlpha = (0.14 + 0.6 * edge) * depthFade * mix(1.0, 0.18, uShrink) * (1.0 + abs(wave) * 1.6);',
+      '  vec3 base = mix(vec3(0.30, 0.62, 1.0), vec3(1.0, 0.78, 0.40), uTint * 0.45);',
+      '  vColor = mix(base, vec3(1.0, 0.72, 0.36) * 1.15, clamp(abs(wave) * 1.8, 0.0, 1.0));',
+      '  gl_PointSize = aSize * 0.034 * uPx / -mv.z * (1.0 - uShrink * 0.4);',
+      '}'
+    ].join('\n'),
+    fragmentShader: [
+      'varying float vAlpha; varying vec3 vColor;',
+      'void main() {',
+      '  float r = length(gl_PointCoord - 0.5) * 2.0;',
+      '  if (r > 1.0) discard;',
+      '  gl_FragColor = vec4(vColor, pow(1.0 - r, 1.5) * vAlpha);',
+      '}'
+    ].join('\n')
+  });
+
+  (function buildCloud() {
+    var pos = new Float32Array(CLOUD_N * 3), seed = new Float32Array(CLOUD_N), size = new Float32Array(CLOUD_N);
+    for (var i = 0; i < CLOUD_N; i++) {
+      var r = R * Math.pow(Math.random(), 0.6);          // exponent < 1 puts more points near the centre
+      var z = Math.random() * 2 - 1, phi = Math.random() * Math.PI * 2, s = Math.sqrt(1 - z * z);
+      pos[i * 3] = r * s * Math.cos(phi); pos[i * 3 + 1] = r * s * Math.sin(phi); pos[i * 3 + 2] = r * z;
+      seed[i] = Math.random(); size[i] = 0.7 + Math.random() * 0.8;
+    }
+    var g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    g.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
+    g.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
+    var pts = new THREE.Points(g, cloudMaterial);
+    pts.frustumCulled = false;
+    pts.renderOrder = 1;
+    model.add(pts);
+  })();
+
+  // A faint haze makes the whole cloud read as one soft, translucent, glowing sphere
+  var haze = glowSprite(0x3f86ff, R * 2.5, 0.2);
+  haze.renderOrder = 0;
+  model.add(haze);
+
+  /* -------------------------------- nucleus ------------------------------ */
+  var nucleus = new THREE.Group();
+  var nucleusMesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.2, 32, 32),
+    new THREE.MeshPhongMaterial({ color: 0xff6b86, emissive: 0xc2223f, emissiveIntensity: 0.9, shininess: 80, depthTest: false })
+  );
+  nucleusMesh.renderOrder = 15;
+  var nucleusGlow = glowSprite(0xff4d6d, 1.1, 0.85);
+  nucleusGlow.renderOrder = 14;
+  nucleus.add(nucleusGlow, nucleusMesh);
+  model.add(nucleus);
+
+  /* --------------------- electron as a particle (at contact) ------------- */
+  var electron = new THREE.Group();
+  var electronMat = new THREE.MeshPhongMaterial({
+    color: 0x7dbbff, emissive: 0x2a6cff, emissiveIntensity: 0.9, shininess: 90,
+    transparent: true, opacity: 0, depthWrite: false, depthTest: false
+  });
+  var electronMesh = new THREE.Mesh(new THREE.SphereGeometry(0.055, 24, 24), electronMat);
+  electronMesh.renderOrder = 16;
+  var electronGlow = glowSprite(0x66aaff, 0.5, 0);
+  electronGlow.renderOrder = 15;
+  electron.add(electronGlow, electronMesh);
+  model.add(electron);
+
+  /* ------------------------- dotted photon path -------------------------- */
+  /* Drawn the whole way, straight through the cloud and out the far side. */
+  (function () {
+    var pts = [];
+    for (var x = PATH_X0; x <= PATH_X1 + 1e-6; x += 0.14) pts.push(x, B, 0);
+    var g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3));
+    var dots = new THREE.Points(g, new THREE.PointsMaterial({
+      color: 0xffd27a, size: 0.07, map: glowTex, transparent: true, opacity: 0.75,
+      blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false
+    }));
+    dots.renderOrder = 5;
+    model.add(dots);
+  })();
+
+  /* ------------------------------- photons ------------------------------- */
+  /* A photon is a small bright particle (core + halo) with a short wavy trail:
+     the wave-particle symbol. The trail is a helix that fades with distance. */
+  function makePhoton(tint, maxOpacity) {
+    var group = new THREE.Group();
+    var coreMat = new THREE.MeshBasicMaterial({ color: 0xfff6dc, transparent: true, depthTest: false });
+    var core = new THREE.Mesh(new THREE.SphereGeometry(0.055, 16, 16), coreMat);
+    core.renderOrder = 20;
+    var halo = glowSprite(tint, 0.6, 1);
+    halo.renderOrder = 19;
+
+    var N = 70, L = 0.9;
+    var pos = new Float32Array(N * 3), col = new Float32Array(N * 3), tc = new THREE.Color(tint);
+    for (var i = 0; i < N; i++) {
+      var f = i / (N - 1), fade = Math.pow(1 - f, 1.4);
+      col[i * 3] = tc.r * fade; col[i * 3 + 1] = tc.g * fade; col[i * 3 + 2] = tc.b * fade;
+    }
+    var tg = new THREE.BufferGeometry();
+    tg.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    tg.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    var trailMat = new THREE.PointsMaterial({
+      size: 0.07, map: glowTex, vertexColors: true, transparent: true,
+      blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false
+    });
+    var trail = new THREE.Points(tg, trailMat);
+    trail.renderOrder = 18; trail.frustumCulled = false;
+    group.add(trail, halo, core);
+    group.visible = false;
+
+    return {
+      group: group,
+      setOpacity: function (o) {
+        var v = clamp(o, 0, 1) * maxOpacity;
+        coreMat.opacity = v; halo.material.opacity = v; trailMat.opacity = v;
+      },
+      animate: function (time) {
+        for (var i = 0; i < N; i++) {
+          var f = i / (N - 1), ph = f * 14 - time * 18, amp = 0.05 * (0.4 + 0.6 * (1 - f));
+          pos[i * 3] = -f * L; pos[i * 3 + 1] = Math.sin(ph) * amp; pos[i * 3 + 2] = Math.cos(ph) * amp * 0.8;
+        }
+        tg.attributes.position.needsUpdate = true;
+      }
+    };
+  }
+  var photon    = makePhoton(0xffb938, 1);      // the original photon
+  var ghost     = makePhoton(0xbcd0ff, 0.38);   // dim, semi-transparent ghost photon
+  var newPhoton = makePhoton(0xfff0b8, 1);      // the re-emitted photon
+  model.add(photon.group, ghost.group, newPhoton.group);
+
+  /* -------------------------------- labels ------------------------------- */
+  var labelsEl = document.getElementById('labels');
+  function makeTag(text) {
+    var el = document.createElement('div'); el.className = 'tag'; el.textContent = text;
+    labelsEl.appendChild(el);
+    return { el: el, shown: false };
+  }
+  var tags = {
+    nucleus: makeTag('Nucleus'), cloud: makeTag('Electron Cloud'), electron: makeTag('Electron'),
+    photon: makeTag('Photon'), ghost: makeTag('Ghost Photon'), newp: makeTag('New Photon'), ripples: makeTag('Ripples')
+  };
+  var tmpV = new THREE.Vector3(), W = 1, H = 1;
+  function placeTag(tag, local, dx, dy, align, visible) {
+    if (!visible) { if (tag.shown) { tag.el.style.opacity = 0; tag.shown = false; } return; }
+    tmpV.copy(local); model.localToWorld(tmpV); tmpV.project(camera);
+    var x = (tmpV.x * 0.5 + 0.5) * W + dx, y = (-tmpV.y * 0.5 + 0.5) * H + dy;
+    var ax = align === 'r' ? '-100%' : align === 'c' ? '-50%' : '0';
+    tag.el.style.transform = 'translate(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px) translate(' + ax + ',-50%)';
+    tag.el.style.opacity = 1; tag.shown = true;
+  }
+
+  /* ------------------------------ UI elements ---------------------------- */
+  var stageEls = Array.prototype.slice.call(document.querySelectorAll('#stages li'));
+  var panel = document.getElementById('panel'), panelText = document.getElementById('panelText'), panelBtn = document.getElementById('panelBtn');
+  var curStage = -1, curStatus = '';
+  function setStage(i, text) {
+    if (i !== curStage) { curStage = i; stageEls.forEach(function (el, k) { el.classList.toggle('on', k === i); }); }
+    if (text !== curStatus) { curStatus = text; statusEl.textContent = text; }
+  }
+
+  /* ------------------------------ simulation ----------------------------- */
+  var S;
+  function initialState() {
+    return {
+      phase: 'approach', t: 0, paused: false,
+      shrink: 0, target: CONTACT.clone(), amp: 0, front: 0, rippling: false, vibe: 0, tint: 0, flash: 0,
+      photonX: PATH_X0, photonScale: 1, photonOn: true,
+      ghostOn: false, ghostMoving: false, ghostX: CONTACT.x, ghostA: 0,
+      newOn: false, newX: EXIT.x, newScale: 0, newA: 1,
+      front0: 0, exitFade: 0, replayShown: false,
+      done: { a: false, b: false, c: false, d: false }
+    };
+  }
+
+  function showPanel(text, button, handler) {
+    panelText.hidden = !text; panelText.textContent = text || '';
+    panelBtn.textContent = button; panelBtn.onclick = handler;
+    panel.hidden = false;
+  }
+  function hidePanel() { panel.hidden = true; }
+
+  // The four automatic pauses. Each one shows its explanation and a Continue button.
+  function pauseFor(kind) {
+    S.paused = true;
+    showPanel(PAUSE_TEXT[kind], 'Continue', function () { hidePanel(); S.paused = false; });
+  }
+
+  function reset() {
+    hidePanel();
+    S = initialState();
+    cloudUniforms.uOrigin.value.copy(CONTACT);
+    photon.group.visible = true; ghost.group.visible = false; newPhoton.group.visible = false;
+    setStage(0, 'A photon approaches the electron cloud.');
+  }
+
+  function step(dt) {
+    S.t += dt;
+    var t = S.t;
+
+    // The ghost photon, once released, keeps moving at the speed of light until the end of the path
+    if (S.ghostMoving && S.ghostX < PATH_X1) S.ghostX = Math.min(S.ghostX + LIGHT_SPEED * dt, PATH_X1);
+    // Ripples always advance at their own, slower speed
+    if (S.rippling) S.front += RIPPLE_SPEED * dt;
+
+    switch (S.phase) {
+
+      /* 1-2. Approach, then the cloud concentrates toward the contact point */
+      case 'approach': {
+        S.photonX = Math.min(PATH_X0 + Math.max(0, t - HOLD) * LIGHT_SPEED, CONTACT.x);
+        var u = clamp((t - SHRINK_START) / SHRINK_DUR, 0, 1);
+        S.shrink = easeSine(u);
+        S.target.copy(CONTACT);
+        if (u > 0) setStage(1, 'The cloud gathers toward the point of contact.');
+        else setStage(0, 'A photon approaches the electron cloud.');
+        if (!S.done.a && S.shrink >= 0.04) { S.done.a = true; pauseFor('concentrate'); return; }   // PAUSE 1
+        if (S.photonX >= CONTACT.x) {
+          // 3. Absorption: the photon is inside the electron, which is now a particle
+          S.done.b = true; S.flash = 1;
+          setStage(2, 'The electron, now a particle, absorbs the photon.');
+          S.phase = 'ripples'; S.t = 0;
+          pauseFor('absorb');                                                                       // PAUSE 2
+        }
+        break;
+      }
+
+      /* 4. Ripples cross the atom while the ghost photon races ahead */
+      case 'ripples': {
+        S.photonScale = 1 - clamp(t / ABSORB_FADE, 0, 1);
+        S.tint = clamp(t / 0.6, 0, 1);
+        S.flash = Math.max(0, 1 - t / 0.6);
+        var tex = t - ABSORB_FADE;
+        if (tex >= 0) {
+          if (!S.rippling) { S.rippling = true; S.front = 0; S.ghostOn = true; S.ghostMoving = true; S.ghostX = CONTACT.x; }
+          setStage(3, 'The absorbed energy ripples across the cloud. Light is delayed.');
+          S.ghostA = clamp(tex / 0.3, 0, 1);
+          S.shrink = 1 - easeSine(clamp(tex / EXPAND_DUR, 0, 1));
+          S.amp = clamp(tex / 0.5, 0, 1);
+          if (!S.done.c && S.front >= HX) { S.done.c = true; pauseFor('ripples'); return; }        // PAUSE 3 (midway)
+          if (S.front >= 1.6 * HX) { S.phase = 'collapse2'; S.t = 0; S.target.copy(EXIT); }
+        }
+        break;
+      }
+
+      /* 5a. Second concentration, now toward the exit point */
+      case 'collapse2': {
+        S.shrink = easeSine(clamp(t / SHRINK_DUR, 0, 1));
+        setStage(1, 'The ripples reach the far side and the cloud gathers again.');
+        if (t >= SHRINK_DUR) { S.phase = 'vibrate'; S.t = 0; }
+        break;
+      }
+
+      /* 5b. The collapsed electron vibrates with the stored energy */
+      case 'vibrate': {
+        S.vibe = clamp(t / 0.3, 0, 1);
+        setStage(1, 'The electron vibrates with the stored energy.');
+        if (t >= 0.7) { S.phase = 'emit'; S.t = 0; }
+        break;
+      }
+
+      /* 6-7. Re-emission, relaxation and departure of the new photon */
+      case 'emit': {
+        setStage(4, S.replayShown ? 'The New Photon follows the Ghost Photon and arrives late.' : 'A new photon leaves the electron.');
+        S.newOn = true;
+        S.newScale = smooth(0, 0.5, t);
+        S.newX = t > 0.5 ? Math.min(EXIT.x + (t - 0.5) * LIGHT_SPEED, PATH_X1) : EXIT.x;
+        // ripples and vibration end when the new photon is created: no energy is lost, no new ripples follow
+        S.amp  = 1 - clamp((t - 0.1) / 1.1, 0, 1);
+        S.vibe = 1 - clamp((t - 0.1) / 0.9, 0, 1);
+        S.tint = 1 - clamp((t - 0.1) / 1.4, 0, 1);
+        S.shrink = 1 - easeSine(clamp((t - 0.45) / 1.2, 0, 1));
+        if (S.amp <= 0) S.rippling = false;
+        if (!S.done.d && t >= 0.4) { S.done.d = true; pauseFor('emit'); return; }                   // PAUSE 4
+        if (!S.replayShown && S.newX >= 3.0) {
+          S.replayShown = true;
+          showPanel('', 'Replay', reset);
+        }
+        if (S.newX >= PATH_X1) {
+          S.exitFade = clamp(S.exitFade + dt / 0.9, 0, 1);
+          S.newA = 1 - S.exitFade; S.ghostA = 1 - S.exitFade;
+          if (S.exitFade >= 1 && S.shrink <= 0) S.phase = 'done';
+        }
+        break;
+      }
+    }
+  }
+
+  /* ------------------------------ rendering ------------------------------ */
+  function applyVisuals(time) {
+    var U = cloudUniforms;
+    U.uTime.value = time; U.uShrink.value = S.shrink; U.uTarget.value.copy(S.target);
+    U.uRippleFront.value = S.front; U.uRippleAmp.value = S.amp; U.uVibe.value = S.vibe; U.uTint.value = S.tint;
+
+    // haze follows the gathering cloud
+    haze.position.copy(S.target).multiplyScalar(S.shrink);
+    var hs = R * 2.5 * (1 - 0.88 * S.shrink);
+    haze.scale.set(hs, hs, 1); haze.material.opacity = 0.2 * (1 - 0.85 * S.shrink);
+
+    // nucleus glow pulses very gently
+    var np = 1 + 0.06 * Math.sin(time * 2.2);
+    nucleusGlow.scale.set(1.1 * np, 1.1 * np, 1);
+
+    // electron as a particle: appears once the cloud has gathered into a point
+    var pVis = smooth(0.75, 1.0, S.shrink);
+    var jig = 0.03 * S.vibe;
+    electron.position.set(
+      S.target.x + Math.sin(time * 71) * jig, S.target.y + Math.sin(time * 83 + 1) * jig, S.target.z + Math.sin(time * 67 + 2) * jig);
+    var pulse = 1 + 0.12 * S.vibe * Math.sin(time * 44) + 0.45 * S.flash;
+    electronMesh.scale.setScalar(pulse);
+    electronMat.opacity = 0.95 * pVis;
+    electronGlow.material.opacity = (0.55 + 0.6 * S.flash) * pVis;
+    var gs = 0.5 * pulse; electronGlow.scale.set(gs, gs, 1);
+
+    // photons
+    photon.group.visible = S.photonOn && S.photonScale > 0.001;
+    photon.group.position.set(S.photonX, B, 0); photon.group.scale.setScalar(Math.max(S.photonScale, 0.001));
+    photon.setOpacity(1); photon.animate(time);
+
+    ghost.group.visible = S.ghostOn && S.ghostA > 0.001;
+    ghost.group.position.set(S.ghostX, B, 0); ghost.setOpacity(S.ghostA); ghost.animate(time);
+
+    newPhoton.group.visible = S.newOn && S.newA > 0.001 && S.newScale > 0.001;
+    newPhoton.group.position.set(S.newX, B, 0); newPhoton.group.scale.setScalar(Math.max(S.newScale, 0.001));
+    newPhoton.setOpacity(S.newA); newPhoton.animate(time);
+
+    // labels (all begin with a capital letter)
+    model.updateMatrixWorld();
+    var zero = new THREE.Vector3(0, 0, 0);
+    placeTag(tags.nucleus, zero, 12, 8, 'l', true);
+    placeTag(tags.cloud, new THREE.Vector3(-0.72 * R, -0.69 * R, 0), -6, 4, 'r', S.shrink < 0.4);
+    placeTag(tags.electron, S.target, 0, 32, 'c', pVis > 0.6);
+    placeTag(tags.photon, photon.group.position, 0, -26, 'c', photon.group.visible && S.photonScale > 0.5);
+    placeTag(tags.ghost, ghost.group.position, 0, -26, 'c', ghost.group.visible && S.ghostA > 0.5);
+    placeTag(tags.newp, newPhoton.group.position, 0, -28, 'c', newPhoton.group.visible && S.newScale > 0.6 && S.newA > 0.5);
+    var rp = new THREE.Vector3(CONTACT.x + 0.8 * S.front, CONTACT.y + 0.6 * S.front, 0);
+    placeTag(tags.ripples, rp, 0, -14, 'c', S.amp > 0.15 && S.shrink < 0.4 && S.front > 0.3 && S.front < 1.5 * HX);
+  }
+
+  /* ------------------------ drag to turn the whole atom ------------------- */
+  var dragging = false, lastX = 0, lastY = 0, dq = new THREE.Quaternion(), de = new THREE.Euler();
+  canvas.addEventListener('pointerdown', function (e) {
+    dragging = true; lastX = e.clientX; lastY = e.clientY;
+    canvas.classList.add('dragging');
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* not critical */ }
+  });
+  canvas.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    var dx = e.clientX - lastX, dy = e.clientY - lastY; lastX = e.clientX; lastY = e.clientY;
+    // rotate about the screen axes; works at any time, including while paused
+    de.set(dy * 0.008, dx * 0.008, 0, 'XYZ');
+    dq.setFromEuler(de);
+    model.quaternion.premultiply(dq);
+  });
+  function endDrag() { dragging = false; canvas.classList.remove('dragging'); }
+  canvas.addEventListener('pointerup', endDrag);
+  canvas.addEventListener('pointercancel', endDrag);
+  canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+
+  /* -------------------------------- layout -------------------------------- */
+  /* The camera distance never changes. On narrow screens the field of view widens
+     instead, so the atom and its path stay inside the window. */
+  function layout() {
+    W = window.innerWidth; H = window.innerHeight;
+    var pr = Math.min(window.devicePixelRatio || 1, 2);
+    renderer.setPixelRatio(pr);
+    renderer.setSize(W, H, false);
+    camera.aspect = W / H;
+    var need = 3.8;                                           // half-width (world units) that must fit
+    var vf = 2 * Math.atan(Math.tan(Math.atan(need / CAM_DIST)) / camera.aspect);
+    vf = clamp(vf, 44 * Math.PI / 180, 100 * Math.PI / 180);
+    camera.fov = vf * 180 / Math.PI;
+    camera.updateProjectionMatrix();
+    cloudUniforms.uPx.value = (H * pr) / (2 * Math.tan(vf / 2));
+  }
+  window.addEventListener('resize', layout);
+  layout();
+
+  /* ---------------------------------- loop -------------------------------- */
+  reset();
+  var last = performance.now(), clock = 0;
+  function frame(now) {
+    var dt = Math.min(0.05, (now - last) / 1000); last = now; clock += dt;
+    if (!S.paused) step(dt);
+    applyVisuals(clock);
+    renderer.render(scene, camera);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // Small hook used only for automated checks
+  window.__theory3 = { state: function () { return S; } };
+})();
+</script>
+
+</body>
+</html>
